@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">IZ Recorder</string>
+    <string name="import_label">IZ Recorder: расшифровать</string>
+    <string name="volume_service_label">IZ Recorder — кнопки громкости</string>
+    <string name="volume_service_description">Несколько быстрых нажатий любой кнопки громкости включают или выключают запись с микрофона. Служба видит только нажатия кнопок громкости и не читает содержимое экрана. Начало записи подтверждается вибрацией, а пока идёт запись, показывается уведомление.</string>
+    <string name="shortcut_service_label">IZ Recorder — удержание громкости</string>
+    <string name="shortcut_service_description">Назначьте эту службу на быструю команду «Удерживать кнопки громкости»: удержание обеих кнопок включит или выключит запись. Служба срабатывает один раз и сразу выключается.</string>
+</resources>

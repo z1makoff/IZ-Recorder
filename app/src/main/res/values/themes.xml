@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.IZRecorder" parent="android:Theme.Material.NoActionBar" />
+
+    <style name="Theme.IZRecorder.Translucent" parent="android:Theme.Translucent.NoTitleBar" />
+</resources>
