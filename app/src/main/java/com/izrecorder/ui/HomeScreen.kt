@@ -90,9 +90,10 @@ fun HomeScreen(
     val settings by Settings.flow.collectAsState()
 
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
+        val app = context.applicationContext
         if (uris.isNotEmpty()) Thread {
-            val n = uris.count { runCatching { ImportActivity.importAudio(context, it, null) }.getOrDefault(false) }
-            if (n > 0) Transcriber.enqueue(context)
+            val n = uris.count { runCatching { ImportActivity.importAudio(app, it, null) }.getOrDefault(false) }
+            if (n > 0) Transcriber.enqueue(app)
         }.start()
     }
 

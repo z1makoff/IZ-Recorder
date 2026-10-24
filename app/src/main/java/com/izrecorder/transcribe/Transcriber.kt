@@ -144,6 +144,15 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
             }
             val samples = AudioDecoder.readSamples(pcm, fromSample, count)
             val chunkMs = count * 1000L / SR
+            if (isSilent(samples)) {
+                // В тишине whisper склонен «придумывать» фразы — такие куски пропускаем.
+                doneMs = endSample * 1000 / SR
+                val until = doneMs
+                RecordingRepository.update(start.id) {
+                    it.copy(transcribedUntilMs = until, progress = (until.toFloat() / totalMs).coerceIn(0f, 1f))
+                }
+                continue
+            }
             val chunkStarted = SystemClock.elapsedRealtime()
             var lastSaved = -10
             val listener = WhisperLib.ProgressListener { percent ->
@@ -162,7 +171,7 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
             val offset = doneMs
             val newSegments = (0 until n).mapNotNull { i ->
                 val text = String(WhisperLib.segmentText(ctx, i), Charsets.UTF_8).trim()
-                if (text.isEmpty() || isNoise(text)) null
+                if (text.isEmpty() || isNoise(text) || isHallucination(text)) null
                 else Segment(offset + WhisperLib.segmentT0(ctx, i), offset + WhisperLib.segmentT1(ctx, i), text)
             }
             val lang = WhisperLib.detectedLanguage(ctx)
@@ -207,6 +216,31 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
             i += frame
         }
         return searchFrom + best
+    }
+
+    /** Почти тишина: самые громкие 100-мс отрезки куска тише примерно −45 дБ. */
+    private fun isSilent(samples: FloatArray): Boolean {
+        val frame = SR / 10
+        var maxRms = 0.0
+        var i = 0
+        while (i + frame <= samples.size) {
+            var e = 0.0
+            for (j in i until i + frame) e += samples[j] * samples[j]
+            maxRms = maxOf(maxRms, Math.sqrt(e / frame))
+            i += frame
+        }
+        return maxRms < 0.0056
+    }
+
+    /** Типичные фразы, которые whisper выдумывает на шуме и тишине. */
+    private val hallucinations = listOf(
+        "продолжение следует", "субтитры", "редактор субтитров", "спасибо за просмотр",
+        "thanks for watching", "thank you for watching", "subtitles by", "please subscribe",
+    )
+
+    private fun isHallucination(text: String): Boolean {
+        val t = text.lowercase().trim(' ', '.', '!', '…')
+        return hallucinations.any { t.startsWith(it) }
     }
 
     /** Отбрасываем служебные пометки whisper вроде «[Music]» или «(шум)». */
