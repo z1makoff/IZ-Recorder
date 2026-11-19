@@ -48,6 +48,7 @@ Java_com_izrecorder_transcribe_WhisperLib_initContext(JNIEnv *env, jobject, jstr
     const char *path = env->GetStringUTFChars(model_path, nullptr);
     whisper_context_params cparams = whisper_context_default_params();
     cparams.use_gpu = false;
+    cparams.flash_attn = true; // заметно быстрее на процессоре
     whisper_context *ctx = whisper_init_from_file_with_params(path, cparams);
     env->ReleaseStringUTFChars(model_path, path);
     return reinterpret_cast<jlong>(ctx);
@@ -150,9 +151,11 @@ Java_com_izrecorder_transcribe_WhisperLib_detectedLanguage(JNIEnv *env, jobject,
 
 JNIEXPORT jint JNICALL
 Java_com_izrecorder_transcribe_WhisperLib_recommendedThreads(JNIEnv *, jobject) {
+    // Потоки whisper ждут друг друга, поэтому общий темп задаёт самое медленное ядро.
+    // 4 потока помещаются на быстрые ядра (у Tensor G3 их 4 + 1); больше — уже на медленные.
     unsigned hw = std::thread::hardware_concurrency();
     if (hw == 0) return 4;
-    return (jint) (hw > 6 ? 6 : (hw < 2 ? 2 : hw - 2));
+    return (jint) (hw >= 8 ? 4 : (hw < 2 ? 2 : hw / 2));
 }
 
 } // extern "C"

@@ -108,7 +108,11 @@ class VolumeKeyService : AccessibilityService() {
             am.mode == AudioManager.MODE_IN_COMMUNICATION || am.mode == AudioManager.MODE_RINGTONE
         ) return
         try {
-            val s = session ?: MediaSession(this, TAG).also { session = it }
+            val s = session ?: MediaSession(this, TAG).also {
+                // Без обработчика команд система молча не доставляет сеансу нажатия громкости.
+                it.setCallback(object : MediaSession.Callback() {}, handler)
+                session = it
+            }
             s.setPlaybackToRemote(object : VolumeProvider(VOLUME_CONTROL_RELATIVE, 100, 50) {
                 override fun onAdjustVolume(direction: Int) {
                     // direction = 0 — запрос «показать громкость», это не нажатие.
