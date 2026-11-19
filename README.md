@@ -24,8 +24,8 @@
 
 ## Установка
 
-1. Откройте на телефоне раздел **Releases** этого репозитория, скачайте последний
-   `IZRecorder-N.apk` и установите (Android попросит разрешить установку из браузера).
+1. Соберите APK локально и поставьте на телефон по USB (см. «Сборка»). Старые APK из
+   раздела Releases подписаны другим ключом и поверх нынешней версии не встанут.
 2. Откройте приложение и разрешите микрофон и уведомления.
 3. Включите службу «IZ Recorder — кнопки громкости»:
    Настройки → Спец. возможности → IZ Recorder — кнопки громкости.
@@ -48,13 +48,16 @@
 
 ## Сборка
 
-APK собирается автоматически в GitHub Actions (`.github/workflows/android.yml`) на каждый push
-и публикуется в Releases.
+Приложение подписано постоянным ключом, который хранится только на компьютере:
+`%USERPROFILE%\.iz-recorderelease.jks` (пароли — в `README.txt` рядом). Без этого ключа
+новые версии не встанут поверх установленной, придётся удалять приложение вместе с записями,
+поэтому держите копию этой папки в надёжном месте.
 
-Чтобы обновления ставились поверх старой версии без потери записей, у всех сборок должна
-быть одна подпись. Для постоянной подписи добавьте в Settings → Secrets → Actions:
-`IZ_KEYSTORE_BASE64` (keystore в base64), `IZ_KEYSTORE_PASSWORD`, `IZ_KEY_ALIAS`,
-`IZ_KEY_PASSWORD`. Без них используется debug-ключ, который хранится в кэше Actions.
-Кэш может очиститься, если сборок не было больше недели.
+Сборка и установка (нужны JDK 17, Android SDK, NDK 27.0.12077973, CMake 3.22.1):
 
-Локально: `./gradlew assembleRelease` (нужны Android SDK и NDK).
+```
+IZ_KEYSTORE_PATH=~/.iz-recorder/release.jks IZ_KEYSTORE_PASSWORD=… IZ_KEY_ALIAS=izrecorder IZ_KEY_PASSWORD=… ./gradlew assembleRelease
+adb install -r app/build/outputs/apk/release/app-release.apk
+```
+
+GitHub Actions на каждый push только проверяет, что код собирается, и APK не публикует.
