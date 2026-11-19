@@ -1,14 +1,21 @@
 package com.izrecorder.transcribe
 
+import android.app.NotificationManager
 import android.content.Context
+import android.content.pm.ServiceInfo
+import android.os.Build
 import android.os.SystemClock
 import android.util.Log
+import androidx.core.app.NotificationCompat
 import androidx.work.ExistingWorkPolicy
+import androidx.work.ForegroundInfo
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.Worker
 import androidx.work.WorkerParameters
+import com.izrecorder.App
+import com.izrecorder.R
 import com.izrecorder.Settings
 import com.izrecorder.data.Recording
 import com.izrecorder.data.RecordingRepository
@@ -33,29 +40,45 @@ object Transcriber {
             r.copy(status = Status.PENDING, segments = emptyList(), transcribedUntilMs = 0, progress = 0f, error = "")
         )
         File(context.cacheDir, "pcm/${r.id}.pcm").delete()
+        stallPrefs(context).edit().remove(r.id).apply()
         enqueue(context)
     }
+
+    /** Сколько раз подряд расшифровка одной записи начиналась с одного и того же места. */
+    internal fun stallPrefs(context: Context) =
+        context.getSharedPreferences("transcribe_stalls", Context.MODE_PRIVATE)
 }
 
 /**
- * Расшифровывает записи кусками примерно по минуте. Фоновая задача Android живёт не дольше
- * 10 минут, поэтому прогресс сохраняется после каждого куска, а при нехватке времени
- * задача ставит в очередь своё продолжение.
+ * Расшифровывает записи кусками по ~30 секунд, сохраняя прогресс после каждого куска.
+ *
+ * Работает как foreground-задача с уведомлением: так Android даёт ей быстрые ядра и не
+ * обрывает через несколько минут. Без этого (обычная фоновая задача) расшифровка шла на
+ * медленных ядрах, система обрывала её посреди куска, перезапускала с того же места — и так
+ * по кругу весь день, сажая батарею. Если foreground не разрешён, задача укладывается
+ * в 8 минут и ставит в очередь продолжение. Если запись несколько раз подряд не продвигается,
+ * её расшифровка останавливается с ошибкой, а не крутится бесконечно.
  */
 class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(context, params) {
 
     companion object {
         private const val TAG = "TranscribeWorker"
-        private const val CHUNK_MS = 60_000L
+        private const val CHUNK_MS = 30_000L
         private const val SEARCH_MS = 8_000L
         private const val BUDGET_MS = 8 * 60_000L
         private const val SR = AudioDecoder.SAMPLE_RATE
+        private const val NOTIFICATION_ID = 3
+        /** Сколько раз подряд можно начать с одного места, прежде чем сдаться. */
+        private const val MAX_STALLS = 3
+        private const val MODEL_FAIL_KEY = "model_load_failures"
     }
 
     private val startedAt = SystemClock.elapsedRealtime()
     private var ctx = 0L
     /** Сколько миллисекунд обработки уходит на миллисекунду аудио (оценка). */
     private var speedRatio = 1.0
+    /** true — задача работает как foreground и не ограничена 10 минутами. */
+    private var foreground = false
 
     override fun doWork(): Result {
         val context = applicationContext
@@ -64,19 +87,32 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
             ModelManager.ensureDownload(context, model)
             return Result.success() // продолжим, когда модель скачается
         }
+        WhisperLib.resetAbort()
         try {
             while (!isStopped) {
                 val next = RecordingRepository.all.value
                     .filter { it.status == Status.PENDING || it.status == Status.TRANSCRIBING }
                     .maxByOrNull { it.createdAt } ?: break
                 if (ctx == 0L) {
+                    // Уведомление появляется, только когда действительно есть что расшифровывать.
+                    foreground = tryStartForeground("Подготовка…")
                     ctx = WhisperLib.initContext(ModelManager.file(context, model).absolutePath)
+                    val stalls = Transcriber.stallPrefs(context)
                     if (ctx == 0L) {
                         Log.e(TAG, "model load failed")
-                        ModelManager.delete(context, model)
-                        ModelManager.ensureDownload(context, model)
+                        val failures = stalls.getInt(MODEL_FAIL_KEY, 0) + 1
+                        stalls.edit().putInt(MODEL_FAIL_KEY, failures).apply()
+                        if (failures <= 1) {
+                            // Возможно, файл повреждён — скачиваем заново, но только один раз.
+                            ModelManager.delete(context, model)
+                            ModelManager.ensureDownload(context, model)
+                        } else {
+                            // Иначе получился бы бесконечный круг «скачать 190 МБ → ошибка».
+                            failPending("модель распознавания не загружается. Выберите другую модель в настройках.")
+                        }
                         return Result.success()
                     }
+                    stalls.edit().remove(MODEL_FAIL_KEY).apply()
                 }
                 val finished = try {
                     process(next)
@@ -104,6 +140,42 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
         WhisperLib.abort()
     }
 
+    private fun failPending(message: String) {
+        RecordingRepository.all.value
+            .filter { it.status == Status.PENDING || it.status == Status.TRANSCRIBING }
+            .forEach { r -> RecordingRepository.update(r.id) { it.copy(status = Status.ERROR, error = message) } }
+    }
+
+    private fun notification(text: String) =
+        NotificationCompat.Builder(applicationContext, App.CHANNEL_TRANSCRIBING)
+            .setSmallIcon(R.drawable.ic_notification)
+            .setContentTitle("Расшифровка записи")
+            .setContentText(text)
+            .setOngoing(true)
+            .setSilent(true)
+            .build()
+
+    private fun foregroundInfo(text: String): ForegroundInfo {
+        val type = if (Build.VERSION.SDK_INT >= 35) ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING
+        else ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC
+        return ForegroundInfo(NOTIFICATION_ID, notification(text), type)
+    }
+
+    /** @return true, если Android разрешил работать как foreground-задача. */
+    private fun tryStartForeground(text: String): Boolean = try {
+        setForegroundAsync(foregroundInfo(text)).get()
+        true
+    } catch (e: Exception) {
+        Log.w(TAG, "foreground not allowed, running as regular background work", e)
+        false
+    }
+
+    private fun updateNotification(text: String) {
+        if (!foreground) return
+        applicationContext.getSystemService(NotificationManager::class.java)
+            .notify(NOTIFICATION_ID, notification(text))
+    }
+
     private fun pcmFile(r: Recording) = File(applicationContext.cacheDir, "pcm/${r.id}.pcm")
 
     /** @return true — запись обработана полностью, false — не хватило времени. */
@@ -113,6 +185,26 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
             RecordingRepository.update(start.id) { it.copy(status = Status.ERROR, error = "Аудиофайл не найден") }
             return true
         }
+        // Защита от бесконечного круга: запись снова и снова начинается с одного места.
+        val stalls = Transcriber.stallPrefs(applicationContext)
+        val prev = stalls.getString(start.id, null)?.split(':')
+        val count = if (prev?.getOrNull(0)?.toLongOrNull() == start.transcribedUntilMs) {
+            (prev?.getOrNull(1)?.toIntOrNull() ?: 0) + 1
+        } else 1
+        if (count > MAX_STALLS) {
+            stalls.edit().remove(start.id).apply()
+            RecordingRepository.update(start.id) {
+                it.copy(
+                    status = Status.ERROR,
+                    error = "расшифровка не продвигается и остановлена, чтобы не сажать батарею. " +
+                        "Можно запустить заново, лучше на зарядке.",
+                )
+            }
+            pcmFile(start).delete()
+            return true
+        }
+        stalls.edit().putString(start.id, "${start.transcribedUntilMs}:$count").apply()
+
         RecordingRepository.update(start.id) { it.copy(status = Status.TRANSCRIBING) }
 
         val pcm = pcmFile(start)
@@ -133,7 +225,8 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
         while (doneMs < totalMs) {
             if (isStopped) return false
             val elapsed = SystemClock.elapsedRealtime() - startedAt
-            if (elapsed > 30_000 && elapsed + CHUNK_MS * speedRatio * 1.5 > BUDGET_MS) return false
+            if (!foreground && elapsed > 30_000 && elapsed + CHUNK_MS * speedRatio * 1.5 > BUDGET_MS) return false
+            updateNotification("Готово ${doneMs * 100 / totalMs.coerceAtLeast(1)}%")
 
             val fromSample = doneMs * SR / 1000
             val endSample = chooseChunkEnd(pcm, fromSample, totalSamples)
@@ -185,10 +278,13 @@ class TranscribeWorker(context: Context, params: WorkerParameters) : Worker(cont
                     language = it.language.ifEmpty { lang },
                 )
             }
+            // Кусок обработан — счётчик «застреваний» начинается заново с нового места.
+            stalls.edit().putString(start.id, "$until:1").apply()
         }
         RecordingRepository.update(start.id) {
             it.copy(status = Status.DONE, progress = 1f, transcribedUntilMs = totalMs, error = "")
         }
+        stalls.edit().remove(start.id).apply()
         pcm.delete()
         return true
     }

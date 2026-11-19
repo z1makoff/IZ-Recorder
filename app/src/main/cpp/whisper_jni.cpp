@@ -63,13 +63,19 @@ Java_com_izrecorder_transcribe_WhisperLib_abort(JNIEnv *, jobject) {
     g_abort.store(true);
 }
 
+// Сбрасывается только в начале новой задачи. Раньше флаг сбрасывался в начале каждого куска,
+// и отмена, пришедшая между кусками, терялась: остановленная задача продолжала жечь процессор.
+JNIEXPORT void JNICALL
+Java_com_izrecorder_transcribe_WhisperLib_resetAbort(JNIEnv *, jobject) {
+    g_abort.store(false);
+}
+
 JNIEXPORT jint JNICALL
 Java_com_izrecorder_transcribe_WhisperLib_transcribe(
         JNIEnv *env, jobject, jlong ptr, jfloatArray samples, jstring language,
         jint threads, jobject listener) {
     whisper_context *ctx = ctx_of(ptr);
-    if (ctx == nullptr) return -1;
-    g_abort.store(false);
+    if (ctx == nullptr || g_abort.load()) return -1;
 
     const char *lang = env->GetStringUTFChars(language, nullptr);
     std::string lang_str(lang);

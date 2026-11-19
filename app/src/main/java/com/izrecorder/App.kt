@@ -27,6 +27,7 @@ class App : Application() {
     companion object {
         const val CHANNEL_RECORDING = "recording"
         const val CHANNEL_PROBLEMS = "problems"
+        const val CHANNEL_TRANSCRIBING = "transcribing"
         private const val PROBLEM_ID = 2
 
         fun notifyProblem(context: Context, message: String) {
@@ -68,6 +69,11 @@ class App : Application() {
         val nm = getSystemService(NotificationManager::class.java)
         nm.createNotificationChannel(
             NotificationChannel(CHANNEL_RECORDING, "Идёт запись", NotificationManager.IMPORTANCE_LOW).apply {
+                setShowBadge(false)
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_TRANSCRIBING, "Расшифровка", NotificationManager.IMPORTANCE_LOW).apply {
                 setShowBadge(false)
             }
         )

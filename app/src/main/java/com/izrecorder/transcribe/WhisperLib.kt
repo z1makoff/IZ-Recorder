@@ -24,4 +24,5 @@ object WhisperLib {
     external fun detectedLanguage(ctx: Long): String
     external fun recommendedThreads(): Int
     external fun abort()
+    external fun resetAbort()
 }
